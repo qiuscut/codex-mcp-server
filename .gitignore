@@ -1,0 +1,5 @@
+logs/
+.codex_mcp_server.pid
+.env.local
+/tmp/
+.DS_Store

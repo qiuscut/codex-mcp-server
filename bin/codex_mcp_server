@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolves the project root relative to this script so logs/env overrides can live here if desired.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+CODEX_BIN=${CODEX_BIN:-codex}
+if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
+  echo "[codex_mcp_server] Unable to find Codex CLI executable '$CODEX_BIN' in PATH." >&2
+  exit 1
+fi
+
+# Default logging so long-running MCP sessions have useful diagnostics. Users can override RUST_LOG.
+export RUST_LOG=${RUST_LOG:-"codex_core=info,codex_mcp_server=info"}
+
+# Allow overriding CODEX configuration directory via CODEX_HOME or CODEX_CONFIG_FILE.
+if [[ -n "${CODEX_HOME:-}" ]]; then
+  export CODEX_HOME
+fi
+if [[ -n "${CODEX_CONFIG_FILE:-}" ]]; then
+  export CODEX_CONFIG_FILE
+fi
+
+# Give the server a predictable TMPDIR inside the repo when desired.
+if [[ -n "${CODEX_MCP_TMPDIR:-}" ]]; then
+  export TMPDIR="$CODEX_MCP_TMPDIR"
+fi
+
+# Pass everything else straight through to `codex mcp-server` (stdio transport).
+exec "$CODEX_BIN" mcp-server "$@"

@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Client helper that connects STDIO to the codex_mcp_fifo_daemon."""
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_QUEUE_DIR = Path(os.environ.get("CODEX_MCP_QUEUE_DIR", ROOT_DIR / "tmp" / "queue"))
+DEFAULT_SESSIONS_DIR = Path(os.environ.get("CODEX_MCP_SESSIONS_DIR", ROOT_DIR / "tmp" / "sessions"))
+
+
+def pump(read_fn, write_fn, close_fn):
+    try:
+        while True:
+            chunk = read_fn(65536)
+            if not chunk:
+                break
+            write_fn(chunk)
+    finally:
+        close_fn()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Bridge STDIO to a running codex_mcp_server daemon")
+    parser.add_argument("--queue-dir", default=str(DEFAULT_QUEUE_DIR), help="Directory watched by the daemon for session requests")
+    parser.add_argument("--sessions-dir", default=str(DEFAULT_SESSIONS_DIR), help="Directory where session FIFOs will be created")
+    parser.add_argument("--wait-timeout", type=float, default=10.0, help="Seconds to wait for daemon readiness (default: 10s)")
+    args = parser.parse_args()
+
+    queue_dir = Path(args.queue_dir).resolve()
+    sessions_dir = Path(args.sessions_dir).resolve()
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    session_id = uuid.uuid4().hex
+    session_dir = sessions_dir / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    stdin_fifo = session_dir / "stdin.fifo"
+    stdout_fifo = session_dir / "stdout.fifo"
+
+    os.mkfifo(stdin_fifo)
+    os.mkfifo(stdout_fifo)
+
+    payload = {
+        "id": session_id,
+        "stdin": str(stdin_fifo),
+        "stdout": str(stdout_fifo),
+        "session_dir": str(session_dir),
+    }
+
+    queue_file = queue_dir / f"{session_id}.json"
+    tmp_queue = queue_file.with_suffix(".json.tmp")
+    tmp_queue.write_text(json.dumps(payload))
+    tmp_queue.replace(queue_file)
+
+    ready_flag = session_dir / "ready"
+    deadline = time.time() + args.wait_timeout
+    while time.time() < deadline:
+        if ready_flag.exists():
+            break
+        time.sleep(0.05)
+    else:
+        print("[codex_mcp_client] Timed out waiting for daemon to claim the session", file=sys.stderr)
+        return 1
+
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+
+    stdin_pipe = open(stdin_fifo, "wb", buffering=0)
+    stdout_pipe = open(stdout_fifo, "rb", buffering=0)
+
+    def read_stdin(size: int) -> bytes:
+        try:
+            return stdin.read(size)
+        except Exception:
+            return b""
+
+    def write_fifo(data: bytes) -> None:
+        if not data:
+            return
+        try:
+            stdin_pipe.write(data)
+            stdin_pipe.flush()
+        except BrokenPipeError:
+            pass
+
+    def close_fifo_writer() -> None:
+        try:
+            stdin_pipe.close()
+        except Exception:
+            pass
+
+    def read_fifo(size: int) -> bytes:
+        try:
+            return stdout_pipe.read(size)
+        except Exception:
+            return b""
+
+    def write_stdout(data: bytes) -> None:
+        if not data:
+            return
+        try:
+            stdout.write(data)
+            stdout.flush()
+        except BrokenPipeError:
+            pass
+
+    def close_stdout() -> None:
+        try:
+            stdout_pipe.close()
+        except Exception:
+            pass
+
+    threads = [
+        threading.Thread(target=pump, args=(read_stdin, write_fifo, close_fifo_writer), daemon=True),
+        threading.Thread(target=pump, args=(read_fifo, write_stdout, close_stdout), daemon=True),
+    ]
+
+    for t in threads:
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
