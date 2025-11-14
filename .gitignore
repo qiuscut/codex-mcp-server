@@ -3,3 +3,4 @@ logs/
 .env.local
 /tmp/
 .DS_Store
+.env
